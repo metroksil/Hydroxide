@@ -44,14 +44,13 @@ local remotesViewing = {
 local currentRemotes = {}
 
 local remoteDataEvent = Instance.new("BindableEvent")
-local eventSet = false
 
 local function connectEvent(callback)
     remoteDataEvent.Event:Connect(callback)
+end
 
-    if not eventSet then
-        eventSet = true
-    end
+local function getRemoteKey(instance)
+    return instance
 end
 
 local function deepclone(value, copies)
@@ -139,7 +138,30 @@ local function isWatchedRemote(instance)
         or IsA(instance, "BindableFunction")
 end
 
-local function handleRemote(instance, method, ...)
+local function buildCallInfo(vargs)
+    local call = {
+        args = vargs,
+        script = nil,
+        func = nil
+    }
+
+    pcall(function()
+        call.script = getCallingScript((PROTOSMASHER_LOADED ~= nil and 2) or nil)
+    end)
+
+    pcall(function()
+        local info = getInfo(3)
+        call.func = info and info.func
+    end)
+
+    pcall(function()
+        call.args = deepclone(vargs)
+    end)
+
+    return call
+end
+
+local function logRemoteCall(instance, method, ...)
     if typeof(instance) ~= "Instance" then
         return false, false
     end
@@ -148,7 +170,7 @@ local function handleRemote(instance, method, ...)
     local className = remoteInstance.ClassName
     method = normalizeMethod(method)
 
-    if not remotesViewing[className] or remoteInstance == remoteDataEvent then
+    if not remotesViewing[className] or instance == remoteDataEvent then
         return false, false
     end
 
@@ -162,28 +184,25 @@ local function handleRemote(instance, method, ...)
         return true, false
     end
 
-    local remote = currentRemotes[remoteInstance]
+    local remoteKey = getRemoteKey(instance)
+    local remote = currentRemotes[remoteKey]
 
     if not remote then
         remote = Remote.new(remoteInstance)
-        currentRemotes[remoteInstance] = remote
+        currentRemotes[remoteKey] = remote
     end
 
-    local remoteIgnored = remote.Ignored
-    local remoteBlocked = remote.Blocked
-    local argsIgnored = remote:AreArgsIgnored(vargs)
-    local argsBlocked = remote:AreArgsBlocked(vargs)
-    local blocked = remoteBlocked or argsBlocked
+    local blocked = remote.Blocked or remote:AreArgsBlocked(vargs)
+    local ignored = remote.Ignored or remote:AreArgsIgnored(vargs)
 
-    if eventSet and (not remoteIgnored and not argsIgnored) then
-        local call = {
-            script = getCallingScript((PROTOSMASHER_LOADED ~= nil and 2) or nil),
-            args = deepclone(vargs),
-            func = getInfo(3).func
-        }
+    if not ignored then
+        local call = buildCallInfo(vargs)
 
         remote:IncrementCalls(call)
-        remoteDataEvent:Fire(remoteInstance, call)
+
+        task.defer(function()
+            remoteDataEvent:Fire(remoteKey, call)
+        end)
     end
 
     return true, blocked
@@ -202,35 +221,29 @@ local newNamecall = newCClosure(function(...)
     ) then
         local instance = ...
 
-        if typeof(instance) == "Instance" then
-            local remoteInstance = cloneRef(instance)
+        if typeof(instance) == "Instance" and isWatchedRemote(cloneRef(instance)) then
+            local _, blocked = logRemoteCall(instance, method, ...)
 
-            if isWatchedRemote(remoteInstance) then
-                local _, blocked = handleRemote(instance, method, ...)
-
-                if blocked then
-                    return
-                end
+            if blocked then
+                return
             end
         end
     end
 
-    return originalNamecall(...)
+    if type(originalNamecall) == "function" then
+        return originalNamecall(...)
+    end
 end)
 
 local function makeDirectHook(methodName, originalMethod)
     return newCClosure(function(...)
         local instance = ...
 
-        if typeof(instance) == "Instance" then
-            local remoteInstance = cloneRef(instance)
+        if typeof(instance) == "Instance" and isWatchedRemote(cloneRef(instance)) then
+            local _, blocked = logRemoteCall(instance, methodName, ...)
 
-            if isWatchedRemote(remoteInstance) then
-                local _, blocked = handleRemote(instance, methodName, ...)
-
-                if blocked then
-                    return
-                end
+            if blocked then
+                return
             end
         end
 
@@ -277,7 +290,7 @@ if synv3 and synHook then
     if hasUnreliableRemote then
         originalUnreliableEvent = synHook(originalUnreliableEvent, cloneFunc(newUnreliableFireServer))
     end
-else
+elseif hookMetaMethod then
     originalNamecall = hookMetaMethod(game, "__namecall", cloneFunc(newNamecall))
     originalEvent = hookFunction(originalEvent, cloneFunc(newFireServer))
     originalFunction = hookFunction(originalFunction, cloneFunc(newInvokeServer))
@@ -287,12 +300,31 @@ else
     if hasUnreliableRemote then
         originalUnreliableEvent = hookFunction(originalUnreliableEvent, cloneFunc(newUnreliableFireServer))
     end
+elseif hookFunction and getMetatable then
+    originalNamecall = hookFunction(getMetatable(game).__namecall, cloneFunc(newNamecall))
+    originalEvent = hookFunction(originalEvent, cloneFunc(newFireServer))
+    originalFunction = hookFunction(originalFunction, cloneFunc(newInvokeServer))
+    originalBindableEvent = hookFunction(originalBindableEvent, cloneFunc(newBindableFire))
+    originalBindableFunction = hookFunction(originalBindableFunction, cloneFunc(newBindableInvoke))
+
+    if hasUnreliableRemote then
+        originalUnreliableEvent = hookFunction(originalUnreliableEvent, cloneFunc(newUnreliableFireServer))
+    end
+else
+    originalEvent = hookFunction(originalEvent, cloneFunc(newFireServer))
+    originalFunction = hookFunction(originalFunction, cloneFunc(newInvokeServer))
+    originalBindableEvent = hookFunction(originalBindableEvent, cloneFunc(newBindableFire))
+    originalBindableFunction = hookFunction(originalBindableFunction, cloneFunc(newBindableInvoke))
+
+    if hasUnreliableRemote then
+        originalUnreliableEvent = hookFunction(originalUnreliableEvent, cloneFunc(newUnreliableFireServer))
+    end
+
+    warn("[Hydroxide RemoteSpy] __namecall hook unavailable, using direct method hooks only")
 end
 
 if type(originalNamecall) ~= "function" then
-    originalNamecall = function(...)
-        return ...
-    end
+    originalNamecall = nil
 end
 
 oh.Hooks[originalEvent] = newFireServer
