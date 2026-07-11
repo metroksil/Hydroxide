@@ -994,12 +994,19 @@ conditionValueType:SetCallback(function(_dropdown, selected)
 end)
 
 Methods.ConnectEvent(function(remoteInstance, callInfo)
-    if not removed[remoteInstance] then
-        local remote = currentRemotes[remoteInstance]
-        local log = currentLogs[remoteInstance] or Log.new(remote)
-
-        log:IncrementCalls(callInfo)
+    if removed[remoteInstance] then
+        return
     end
+
+    local remote = currentRemotes[remoteInstance]
+
+    if not remote then
+        return
+    end
+
+    local log = currentLogs[remoteInstance] or Log.new(remote)
+
+    log:IncrementCalls(callInfo)
 end)
 
 return RemoteSpy
